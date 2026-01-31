@@ -3586,6 +3586,74 @@ try{
       }
     });
 
+function __cd_bulkRemoveDupes(){
+  try{
+    const items = loadCustomDeck();
+    if(!Array.isArray(items) || items.length===0){
+      const st = document.getElementById("cd_status");
+      if(st) st.textContent = "データがありません";
+      return;
+    }
+
+    // 現在の絞り込み範囲（検索/lang/Lv/重複だけ）に対して重複を判定
+    const order = __cd_filteredOrder(items); // index list (newest first)
+    const counts = new Map();
+    for(const i of order){
+      const it = items[i] || {};
+      const en = __cd_trim(it.en).toLowerCase();
+      const lang = __cd_trim(it.lang);
+      if(!en) continue;
+      const key = `${en}||${lang}`;
+      counts.set(key, (counts.get(key)||0) + 1);
+    }
+
+    const keep = new Map();
+    for(const i of order){
+      const it = items[i] || {};
+      const en = __cd_trim(it.en).toLowerCase();
+      const lang = __cd_trim(it.lang);
+      if(!en) continue;
+      const key = `${en}||${lang}`;
+      if((counts.get(key)||0) < 2) continue;
+      // 新しい順に見て、最初に見つかった1件を残す
+      if(!keep.has(key)) keep.set(key, i);
+    }
+
+    const del = new Set();
+    for(const i of order){
+      const it = items[i] || {};
+      const en = __cd_trim(it.en).toLowerCase();
+      const lang = __cd_trim(it.lang);
+      if(!en) continue;
+      const key = `${en}||${lang}`;
+      if((counts.get(key)||0) < 2) continue;
+      if(keep.get(key) !== i) del.add(i);
+    }
+
+    if(del.size === 0){
+      const st = document.getElementById("cd_status");
+      if(st) st.textContent = "重複は見つかりません";
+      return;
+    }
+
+    const ok = confirm(`現在の絞り込み範囲で、重複 ${del.size} 件を一括削除します。\n（各グループで最新の1件だけ残します）\nよろしいですか？`);
+    if(!ok) return;
+
+    const next = items.filter((_,i)=>!del.has(i));
+    saveCustomDeck(next);
+    renderCustomDeckPanel();
+    renderCustomDeckHint();
+
+    const st = document.getElementById("cd_status");
+    if(st) st.textContent = `🧹 重複を一括削除: ${del.size}件`;
+  }catch(e){
+    const st = document.getElementById("cd_status");
+    if(st) st.textContent = "一括削除に失敗しました";
+  }
+}
+
+
+
     // Filters
     const __wireFilters = () => {
       const q = document.getElementById("cd_search");
@@ -3593,6 +3661,7 @@ try{
       const fv = document.getElementById("cd_filter_level");
       const dup = document.getElementById("cd_only_dupes");
       const clr = document.getElementById("cd_clear_filters");
+      const bulk = document.getElementById("cd_bulk_dedup");
       const apply = () => { renderCustomDeckPanel(); };
       if(q){
         q.addEventListener("input", ()=>{ __cd_filters.q = q.value; apply(); });
@@ -3612,6 +3681,10 @@ try{
           try{ if(q) q.value=""; if(fl) fl.value=""; if(fv) fv.value=""; if(dup) dup.checked=false; }catch(e){}
           apply();
         });
+      }
+
+      if(bulk){
+        bulk.addEventListener("click", ()=>{ try{ __cd_bulkRemoveDupes(); }catch(e){} });
       }
     };
     try{ __wireFilters(); }catch(e){}
@@ -3927,8 +4000,10 @@ function __cd_filteredOrder(items){
     idx.push(i);
   }
 
-  // 新しい単語を上に（元の仕様を維持）
-  return idx.reverse();
+  
+
+
+return idx.reverse();
 }
 
 function normalizeBoolStr(v){
@@ -4690,6 +4765,7 @@ addEventListener('orientationchange', setVh);
               <span class="small" style="opacity:.9;">重複だけ</span>
             </label>
             <button class="btn smallbtn" type="button" id="cd_clear_filters">絞り込み解除</button>
+            <button class="btn smallbtn" type="button" id="cd_bulk_dedup">重複を一括削除</button>
           </div>
           <div style="overflow:auto;">
             <table style="width:100%; border-collapse:collapse;">
