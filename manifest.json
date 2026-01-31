@@ -1,0 +1,11 @@
+{
+  "name": "単語塾(仮)",
+  "short_name": "単語塾",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0b1020",
+  "theme_color": "#0b1020",
+  "description": "単語4択学習（CSV/自作単語帳/復習/成績/音声）",
+  "icons": []
+}
