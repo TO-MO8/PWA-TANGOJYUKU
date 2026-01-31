@@ -3553,7 +3553,82 @@ try{
       }
     });
 
-    // Backup export/import (includes scores, review sets, settings)
+    
+    // Paste import (no-CSV)
+    document.getElementById("cd_paste_open")?.addEventListener("click", () => {
+      const box = document.getElementById("cd_pasteBox");
+      if(!box) return;
+      const show = box.style.display === "none" || !box.style.display;
+      box.style.display = show ? "block" : "none";
+      if(show){
+        try{ document.getElementById("cd_paste_text")?.focus(); }catch(e){}
+      }
+    });
+    document.getElementById("cd_paste_clear")?.addEventListener("click", () => {
+      try{ document.getElementById("cd_paste_text").value = ""; }catch(e){}
+      const ps = document.getElementById("cd_paste_status");
+      if(ps) ps.textContent = "";
+    });
+    document.getElementById("cd_paste_apply")?.addEventListener("click", async () => {
+      try{
+        const ta = document.getElementById("cd_paste_text");
+        const raw = (ta?.value||"").toString();
+        if(!raw.trim()){ alert("貼り付け欄が空です"); return; }
+        const lang = (document.getElementById("cd_langChoice")?.value || "en").toString();
+        const ttsDefault = (document.getElementById("cd_tts")?.value || "").toString();
+        const autoT = !!document.getElementById("cd_paste_autotrans")?.checked;
+        const startNow = !!document.getElementById("cd_paste_start")?.checked;
+        const ps = document.getElementById("cd_paste_status");
+        if(ps) ps.textContent = `解析中…`;
+
+        let items = __cd_parsePaste(raw, lang, ttsDefault).filter(it => (it.en||it.ja));
+        // normalize: if only one side provided, keep; translation optionally fills
+        if(autoT){
+          if(ps) ps.textContent = `自動翻訳中…（最大30件まで）`;
+          items = await __cd_autofillMissingByTranslate(items, lang, (d,t)=>{
+            if(ps) ps.textContent = `自動翻訳中… ${d}/${Math.min(t,30)}`;
+          });
+        }
+
+        // must have at least en & ja for game usefulness
+        items = items.filter(it => (it.en||"").toString().trim() && (it.ja||"").toString().trim());
+        if(!items.length){ alert("取り込みできる単語がありません（外国語と日本語が必要）"); if(ps) ps.textContent=""; return; }
+
+        const modeAdd = confirm(`貼り付けから ${items.length}語 取り込みます。\n\nOK: 追加/上書き（重複は上書き）\nキャンセル: 置き換え（いまの自作単語帳を消して入れ替え）`);
+        let cur = modeAdd ? loadCustomDeck() : [];
+        const map = new Map();
+        cur.forEach((it, idx)=>{
+          const key = `${(it.en||"").toString().trim().toLowerCase()}||${(it.lang||"").toString().trim()}`;
+          if(!key.startsWith("||")) map.set(key, idx);
+        });
+
+        let added=0, updated=0;
+        for(const it of items){
+          const key = `${it.en.trim().toLowerCase()}||${(it.lang||"").trim()}`;
+          if(map.has(key)){
+            const idx = map.get(key);
+            cur[idx] = { ...cur[idx], ...it };
+            updated++;
+          }else{
+            cur.push(it);
+            map.set(key, cur.length-1);
+            added++;
+          }
+        }
+        saveCustomDeck(cur);
+        renderCustomDeckPanel();
+        renderCustomDeckHint();
+        if(ps) ps.textContent = `✅ 取り込み完了（追加:${added} / 上書き:${updated}）`;
+
+        if(startNow){
+          try{ document.getElementById("cd_use")?.click(); }catch(e){}
+        }
+      }catch(e){
+        alert("貼り付け取り込みに失敗しました: " + (e?.message||e));
+      }
+    });
+
+// Backup export/import (includes scores, review sets, settings)
     document.getElementById("cd_backup_export")?.addEventListener("click", () => {
       try{
         const obj = __backup_collect();
@@ -4084,6 +4159,149 @@ function __cd_rowsToItems(rows){
     const lang  = (a[col["lang"]]  ?? "").toString().trim();
     const tts   = normalizeBoolStr((a[col["tts"]] ?? "").toString().trim());
     out.push({ en, ja, level, lang, tts });
+  }
+  return out;
+}
+
+
+// ---- Paste import (no-CSV) ----
+function __cd_hasJaChars(s){
+  return /[\u3040-\u30ff\u3400-\u9fff\uF900-\uFAFF]/.test(String(s||""));
+}
+function __cd_parsePaste(raw, lang, ttsDefault){
+  const out = [];
+  const s = (raw||"").toString().replace(/\r\n/g,"\n").replace(/\r/g,"\n");
+  const lines = s.split("\n");
+  for(let ln=0; ln<lines.length; ln++){
+    let line = (lines[ln]||"").trim();
+    if(!line) continue;
+    if(line.startsWith("#") || line.startsWith("//")) continue;
+
+    // remove bullet prefixes
+    line = line.replace(/^[\-\*\u2022]+\s*/,"").trim();
+    if(!line) continue;
+
+    const it = __cd_parsePasteLine(line, lang, ttsDefault);
+    if(it) out.push(it);
+  }
+  return out;
+}
+
+function __cd_parsePasteLine(line, lang, ttsDefault){
+  let en = "", ja = "", lv = "";
+  let parts = null;
+
+  // 1) tab (best)
+  if(line.includes("\t")){
+    parts = line.split("\t").map(x=>String(x||"").trim()).filter(x=>x!== "");
+  }else if(line.includes(",")){
+    // 2) comma (simple)
+    parts = line.split(",").map(x=>String(x||"").trim()).filter(x=>x!== "");
+  }else{
+    // 3) common separators
+    const sepRe = /\s*(?:\:|：|\-|–|—|=>|→)\s*/;
+    if(sepRe.test(line)){
+      parts = line.split(sepRe).map(x=>String(x||"").trim()).filter(x=>x!== "");
+    }
+  }
+
+  if(parts && parts.length>=2){
+    en = parts[0] || "";
+    ja = parts[1] || "";
+    if(parts.length>=3) lv = (parts[2]||"").toString().trim();
+  }else{
+    // 4) heuristic: if line contains Japanese but no obvious separator:
+    //    - If it's Japanese-only (no Latin letters), treat as ja only.
+    //    - Otherwise, split at first Japanese chunk boundary (e.g., "watch out 気をつけて").
+    if(__cd_hasJaChars(line)){
+      const hasLatin = /[A-Za-z]/.test(line);
+      if(!hasLatin){
+        en = "";
+        ja = line.trim();
+      }else{
+        const m = line.match(/^(.+?)\s*([\u3040-\u30ff\u3400-\u9fff\uF900-\uFAFF].*)$/);
+        if(m){
+          en = (m[1]||"").trim();
+          ja = (m[2]||"").trim();
+        }else{
+          // fallback: split by spaces
+          const toks = line.split(/\s+/);
+          en = (toks[0]||"").trim();
+          ja = toks.slice(1).join(" ").trim();
+        }
+      }
+    }else{
+      // no Japanese: treat as "foreign meaning" if separator absent -> split last token as lv if numeric
+      const toks = line.split(/\s+/).filter(Boolean);
+      if(toks.length>=2){
+        en = toks[0];
+        ja = toks.slice(1).join(" ");
+      }else{
+        en = line.trim();
+      }
+    }
+  }
+
+  // clean
+  en = (en||"").toString().trim();
+  ja = (ja||"").toString().trim();
+  lv = (lv||"").toString().trim();
+
+  // heuristic: if user pasted Japanese first or Japanese-only, keep Japanese in 'ja'
+  try{
+    const enHasJa = __cd_hasJaChars(en);
+    const jaHasJa = __cd_hasJaChars(ja);
+    if(en && !ja && enHasJa){
+      ja = en; en = "";
+    }else if(en && ja && enHasJa && !jaHasJa){
+      const tmp = en; en = ja; ja = tmp;
+    }
+  }catch(e){}
+
+  if(!en && !ja) return null;
+
+  // If lv is not numeric, ignore
+  if(lv && !/^\d+(\.\d+)?$/.test(lv)) lv = "";
+
+  const item = {
+    en: en,
+    ja: ja,
+    level: lv ? (lv.includes(".") ? parseFloat(lv) : parseInt(lv,10)) : "",
+    lang: (lang||"").toString().trim(),
+    tts: (ttsDefault||"").toString().trim()
+  };
+  return item;
+}
+
+async function __cd_autofillMissingByTranslate(items, lang, onProgress){
+  // Online translate via MyMemory. Rate-limited; keep it small.
+  const out = [];
+  let done = 0;
+  const MAX = 30; // safety
+  for(const it of items){
+    const x = { ...it };
+    try{
+      if(!x.ja && x.en){
+        if(done < MAX){
+          const t = await translateTextOnline(String(x.en), String(lang||"en"), "ja");
+          x.ja = (t||"").toString().trim();
+          done++;
+          if(onProgress) onProgress(done, items.length);
+          await new Promise(r=>setTimeout(r, 250));
+        }
+      }else if(!x.en && x.ja){
+        if(done < MAX){
+          const t = await translateTextOnline(String(x.ja), "ja", String(lang||"en"));
+          x.en = (t||"").toString().trim();
+          done++;
+          if(onProgress) onProgress(done, items.length);
+          await new Promise(r=>setTimeout(r, 250));
+        }
+      }
+    }catch(e){
+      // ignore single-line failures
+    }
+    out.push(x);
   }
   return out;
 }
@@ -4733,6 +4951,7 @@ addEventListener('orientationchange', setVh);
                 <button class="btn smallbtn half" type="button" id="cd_clear">入力クリア</button>
                 <button class="btn smallbtn half" type="button" id="cd_export">CSVを書き出し</button>
                 <button class="btn smallbtn half" type="button" id="cd_import">CSVから取り込み</button>
+                <button class="btn smallbtn half" type="button" id="cd_paste_open">貼り付けで一括追加</button>
                 <button class="btn smallbtn" type="button" id="cd_backup_export">全データをバックアップ</button>
                 <button class="btn smallbtn" type="button" id="cd_backup_import">バックアップを読み込む</button>
                 <button class="btn smallbtn" type="button" id="cd_use">この自作単語帳で学習</button>
@@ -4740,7 +4959,31 @@ addEventListener('orientationchange', setVh);
               </div>
 
               <input type="hidden" id="cd_editIndex" value="-1">
-              <div class="small" id="cd_status" style="margin-top:10px; opacity:.9;"></div>
+              
+              <div id="cd_pasteBox" class="cardlike" style="display:none; margin-top:10px;">
+                <div class="small" style="opacity:.92; margin-bottom:6px;">
+                  📋 ここに単語リストをまとめて貼り付けできます（1行1語）。<br>
+                  例：<span style="opacity:.9;">apple\tりんご</span> / <span style="opacity:.9;">watch out 気をつけて</span> / <span style="opacity:.9;">bonjour : こんにちは</span>
+                </div>
+                <textarea id="cd_paste_text" rows="7" style="width:100%; resize:vertical;" placeholder="ここに貼り付け（例）&#10;apple	りんご&#10;watch out 気をつけて&#10;bonjour : こんにちは"></textarea>
+                <div class="inline" style="gap:10px; flex-wrap:wrap; margin-top:8px;">
+                  <label class="inline small" style="gap:8px;">
+                    <input type="checkbox" id="cd_paste_autotrans">
+                    <span>足りない側を自動翻訳（オンライン）</span>
+                  </label>
+                  <label class="inline small" style="gap:8px;">
+                    <input type="checkbox" id="cd_paste_start">
+                    <span>追加後すぐ学習開始</span>
+                  </label>
+                </div>
+                <div class="inline" style="gap:10px; flex-wrap:wrap; margin-top:10px;">
+                  <button class="btn smallbtn primary" type="button" id="cd_paste_apply">貼り付けを取り込む</button>
+                  <button class="btn smallbtn" type="button" id="cd_paste_clear">クリア</button>
+                  <span class="small" id="cd_paste_status" style="opacity:.85;"></span>
+                </div>
+              </div>
+
+<div class="small" id="cd_status" style="margin-top:10px; opacity:.9;"></div>
               <input type="file" id="cd_import_file" accept=".csv,text/csv" style="display:none;">
               <input type="file" id="cd_backup_file" accept="application/json,.json" style="display:none;">
       </div>
